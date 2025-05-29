@@ -2,9 +2,8 @@ name: Stahování statistik ZÁPASŮ
 
 on:
   schedule:
-    # Spustí se například každý den ve 2:15 ráno (po statistikách hráčů)
-    - cron: '15 2 * * *'
-  workflow_dispatch: # Umožní ruční spuštění
+    - cron: '15 2 * * *' # Například ve 2:15 ráno
+  workflow_dispatch:
 
 jobs:
   scrape-games:
@@ -16,13 +15,24 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10' 
+          python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt # V requirements.txt musí být requests, beautifulsoup4, supabase, playwright
+
+      # TENTO KROK JE DŮLEŽITÝ
+      - name: Install Playwright Browsers and dependencies
+        run: python -m playwright install --with-deps chromium
 
       - name: Run games scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }} # Tajný service_role klíč
-        run: python scrape_zapasy.py # Nebo název tvého souboru se skriptem pro zápasy
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scrape_zapasy.py
+      
+      - name: Upload error screenshot for games
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-screenshot-zapasy
+          path: error_screenshot_zapasy.png
