@@ -1,5 +1,4 @@
 import os
-import requests # Stále můžeme potřebovat pro jiné věci, ale Playwright bude hlavní
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from playwright.sync_api import sync_playwright
@@ -8,16 +7,14 @@ import sys
 import re
 
 # --- Nastavení ---
+# Upravíme URL, aby explicitně obsahovaly matchFilter=1 pro odehrané zápasy
 PHASES_TO_SCRAPE = [
-    {"nazev": "Play-Off", "url": "https://cechysever.cmshb.cz/tym?id=358&page=games&competition=866&part=2402&season=22&team=15076&showRound=&matchFilter=1"},
-    {"nazev": "Nadstavba - skupina A", "url": "https://cechysever.cmshb.cz/tym?id=358&page=games&competition=866&part=2377&season=22&team=15076&showRound=&matchFilter=1"},
-    {"nazev": "Základní část", "url": "https://cechysever.cmshb.cz/tym?id=358&page=games&competition=866&part=2317&season=22&team=15076&showRound=&matchFilter=1"}
+    {"nazev": "Play-Off", "url_base": "https://cechysever.cmshb.cz/tym?id=358&page=games&competition=866&part=2402&season=22&team=15076&showRound="},
+    {"nazev": "Nadstavba - skupina A", "url_base": "https://cechysever.cmshb.cz/tym?id=358&page=games&competition=866&part=2377&season=22&team=15076&showRound="},
+    {"nazev": "Základní část", "url_base": "https://cechysever.cmshb.cz/tym?id=358&page=games&competition=866&part=2317&season=22&team=15076&showRound="}
 ]
-# Názvy, pod kterými se Warriors mohou objevit na webu
 WARRIORS_TEAM_NAMES_ON_WEB = ["HSÚ SHC Warriors Chlumec", "Warriors Chlumec", "SHC Warriors Chlumec"] 
-# Název, pod kterým chceme Warriors ukládat do DB
 TEAM_NAME_FOR_DB = "Warriors Chlumec"
-
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -40,7 +37,7 @@ def parse_score(score_text):
         return None, None
 
 def determine_warriors_result(domaci_tym, hostujici_tym, domaci_skore, hostujici_skore):
-    if domaci_skore is None or hostujici_skore is None:
+    if domaci_skore is None or hostujici_skore is None: # Pokud zápas nemá skóre, nemá ani výsledek
         return None
 
     warriors_hráli_doma = any(name.lower() in domaci_tym.lower() for name in WARRIORS_TEAM_NAMES_ON_WEB)
@@ -56,52 +53,46 @@ def determine_warriors_result(domaci_tym, hostujici_tym, domaci_skore, hostujici
         else: return "remiza"
     return None
 
-def scrape_games_for_phase_playwright(url, faze_nazev):
-    print(f"Stahuji zápasy pro fázi: {faze_nazev} z URL: {url} (pomocí Playwright)...")
+def scrape_games_for_phase_playwright(url_with_filter, faze_nazev, is_future_game_scrape):
+    print(f"Stahuji zápasy pro fázi: {faze_nazev} z URL: {url_with_filter} (pomocí Playwright)...")
     html_content = ""
     with sync_playwright() as p:
         browser = p.chromium.launch() 
         page = browser.new_page()
         page.set_viewport_size({"width": 1920, "height": 1080})
         try:
-            print(f"Navštěvuji URL: {url}")
-            page.goto(url, timeout=60000) 
+            print(f"Navštěvuji URL: {url_with_filter}")
+            page.goto(url_with_filter, timeout=60000) 
             
             print("Čekám 3 sekundy na inicializaci stránky a JS...")
             time.sleep(3)
 
-            # Pokus o odkliknutí cookie lišty (ID "c-p-bn" je pro "Přijmout vše")
             cookie_button_selector = "button#c-p-bn"
             print(f"Zkouším najít a kliknout na cookie tlačítko: '{cookie_button_selector}'")
             try:
                 page.click(cookie_button_selector, timeout=10000) 
                 print("Cookie lišta úspěšně odkliknuta.")
-                print("Čekám 3 sekundy po odkliknutí cookie lišty...")
-                time.sleep(3)
+                print("Čekám 5 sekund po odkliknutí cookie lišty...")
+                time.sleep(5)
             except Exception as e:
                 print(f"Cookie lišta nenalezena nebo se nepodařilo kliknout (pokračuji): {e}")
             
-            # Čekáme, až se objeví první prvek zápasu na stránce
-            # Na základě tvého HTML to vypadá, že každý zápas je v divu s touto strukturou tříd:
-            # <div class="d-md-flex pt-3 pb-2 align-items-center border-bcolor border-bottom">
-            # Zkusíme počkat na první takový prvek.
-            first_game_card_selector = "div.d-md-flex.border-bottom" # Obecnější selektor
-            print(f"Čekám na první kartu zápasu pomocí selektoru: '{first_game_card_selector}'...")
+            first_game_card_selector = "div.d-md-flex.border-bottom" 
+            print(f"Čekám na první kartu zápasu pomocí selektoru: '{first_game_card_selector}' (state='attached')...")
             page.wait_for_selector(first_game_card_selector, state="attached", timeout=30000)
             print("První karta zápasu nalezena v DOMu.")
             
-            # Dáme ještě chvilku na dokreslení
-            time.sleep(2)
+            time.sleep(2) # Dáme chvilku na dokreslení
             html_content = page.content()
 
         except Exception as e:
             print(f"Chyba během Playwright operací: {e}")
             try:
-                page.screenshot(path="error_screenshot_zapasy.png")
-                print("Screenshot uložen jako error_screenshot_zapasy.png")
+                page.screenshot(path=f"error_screenshot_zapasy_{faze_nazev.replace(' ', '_')}.png")
+                print(f"Screenshot uložen jako error_screenshot_zapasy_{faze_nazev.replace(' ', '_')}.png")
             except Exception as screenshot_error:
                 print(f"Nepodařilo se uložit screenshot: {screenshot_error}")
-            return [] # Při chybě Playwright vracíme prázdný seznam
+            return [] 
         finally:
             browser.close()
 
@@ -112,31 +103,24 @@ def scrape_games_for_phase_playwright(url, faze_nazev):
     soup = BeautifulSoup(html_content, "html.parser")
     games_data = []
     
-    # Selektor pro jednotlivé karty zápasů - na základě tvého HTML kódu
     game_cards = soup.select("div.d-md-flex.pt-3.pb-2.align-items-center.border-bcolor.border-bottom")
     
     if not game_cards:
-        print(f"Nenalezeny žádné konkrétní karty zápasů pomocí selektoru 'div.d-md-flex.border-bottom' v získaném HTML.")
-        # print(f"HTML (prvních 2000 znaků): {html_content[:2000]}") # Pro debug
+        print(f"Nenalezeny žádné konkrétní karty zápasů v získaném HTML pro fázi '{faze_nazev}'.")
         return []
         
     print(f"Nalezeno {len(game_cards)} karet zápasů pro fázi '{faze_nazev}'. Parsuji...")
 
     for card in game_cards:
         try:
-            # DATUM A ČAS ZÁPASU
-            # Hledáme <div class="typography ... flex-shrink-0" style="width: 115px"> <p class="mb-0 font-size-normal">...</p> </div>
             date_time_container = card.select_one("div.typography.flex-shrink-0[style*='width: 115px']")
             datum_cas_text = "N/A"
             if date_time_container:
                 date_p = date_time_container.select_one("p.font-size-normal")
                 if date_p:
-                    # Bereme celý text, může obsahovat <br>
                     raw_date_text = date_p.decode_contents(formatter="html").replace("<br class=\"d-none d-md-block\"/>", " ").replace("<br/>", " ").replace("<br>", " ")
                     datum_cas_text = re.sub(r'\s+', ' ', raw_date_text).strip()
             
-            # TÝMY A SKÓRE
-            # Hledáme <div class="typography ... flex-grow-1 ..."> <p>Domácí<br>Hosté</p> <div>Skóre</div> </div>
             teams_score_container = card.select_one("div.typography.flex-grow-1.d-flex")
             domaci_tym = "N/A"
             hostujici_tym = "N/A"
@@ -146,41 +130,41 @@ def scrape_games_for_phase_playwright(url, faze_nazev):
             if teams_score_container:
                 teams_p = teams_score_container.select_one("p.font-weight-bold.font-size-normal")
                 if teams_p:
-                    # inner_html = teams_p.decode_contents(formatter="html") # Získá HTML obsah včetně <br>
-                    # team_names = [name.strip() for name in inner_html.split('<br/>') if name.strip()]
-                    team_names_raw = teams_p.find_all(string=True, recursive=False) # Zkusí vzít jen přímé texty
+                    team_names_raw = teams_p.find_all(string=True, recursive=False) 
                     team_names = [name.strip() for name in team_names_raw if name.strip()]
-                    if not team_names : # záložní pokud jsou texty vnořené hlouběji nebo je to jeden text s <br>
+                    if not team_names:
                          team_names = [name.strip() for name in teams_p.get_text(separator="<br/>").split('<br/>') if name.strip()]
-
-
-                    if len(team_names) >= 1:
-                        domaci_tym = team_names[0]
-                    if len(team_names) >= 2:
-                        hostujici_tym = team_names[1]
+                    if len(team_names) >= 1: domaci_tym = team_names[0]
+                    if len(team_names) >= 2: hostujici_tym = team_names[1]
                 
-                score_a = teams_score_container.select_one("div.beta a") # Skóre je v odkazu
+                score_a = teams_score_container.select_one("div.beta a") 
                 if score_a:
                     score_text = score_a.text.strip()
-                    if "vs" in score_text.lower() or not score_text:
+                    if "vs" in score_text.lower() or not score_text or not any(char.isdigit() for char in score_text) :
                         odehrano = False
                     else:
                         domaci_skore_val, hostujici_skore_val = parse_score(score_text)
                         odehrano = (domaci_skore_val is not None)
             
-            vysledek_warriors = determine_warriors_result(domaci_tym, hostujici_tym, domaci_skore_val, hostujici_skore_val)
+            # Pro budoucí zápasy bude výsledek vždy None a odehrano False, pokud skóre není vyplněno
+            if is_future_game_scrape and not odehrano:
+                vysledek_warriors = None
+            else:
+                vysledek_warriors = determine_warriors_result(domaci_tym, hostujici_tym, domaci_skore_val, hostujici_skore_val)
 
             # Normalizace názvů týmů pro Warriors
-            if any(name.lower() in domaci_tym.lower() for name in WARRIORS_TEAM_NAMES_ON_WEB):
+            current_domaci_tym = domaci_tym
+            current_hostujici_tym = hostujici_tym
+            if any(name.lower() in current_domaci_tym.lower() for name in WARRIORS_TEAM_NAMES_ON_WEB):
                 domaci_tym = TEAM_NAME_FOR_DB
-            if any(name.lower() in hostujici_tym.lower() for name in WARRIORS_TEAM_NAMES_ON_WEB):
+            if any(name.lower() in current_hostujici_tym.lower() for name in WARRIORS_TEAM_NAMES_ON_WEB):
                 hostujici_tym = TEAM_NAME_FOR_DB
 
             game = {
                 "datum_cas_text": datum_cas_text,
                 "faze_souteze": faze_nazev,
-                "domaci_tym": domaci_tym,
-                "hostujici_tym": hostujici_tym,
+                "domaci_tym": domaci_tym, # Normalizovaný název nebo původní
+                "hostujici_tym": hostujici_tym, # Normalizovaný název nebo původní
                 "domaci_skore": domaci_skore_val,
                 "hostujici_skore": hostujici_skore_val,
                 "odehrano": odehrano,
@@ -198,31 +182,56 @@ def scrape_games_for_phase_playwright(url, faze_nazev):
 if __name__ == "__main__":
     all_games_to_db = []
     
+    print("--- Stahuji ODEHRANÉ ZÁPASY (matchFilter=1) ---")
     for phase_info in PHASES_TO_SCRAPE:
-        games_this_phase = scrape_games_for_phase_playwright(phase_info["url"], phase_info["nazev"])
+        url_with_filter = phase_info["url_base"] + "&matchFilter=1"
+        # Přidáme "(Odehrané)" k názvu fáze pro rozlišení v databázi, pokud chceme
+        # nebo můžeme použít stejný název fáze a UPSERT se postará o aktualizaci
+        games_this_phase = scrape_games_for_phase_playwright(url_with_filter, phase_info["nazev"], False)
         if games_this_phase:
             all_games_to_db.extend(games_this_phase)
-        print(f"Malá pauza mezi fázemi...")
-        time.sleep(5) # Přidáme pauzu mezi stahováním jednotlivých fází
+        print(f"Malá pauza mezi fázemi (odehrané)...")
+        time.sleep(3) # Krátká pauza
+
+    print("\n--- Stahuji BUDOUCÍ ZÁPASY (matchFilter=2) ---")
+    for phase_info in PHASES_TO_SCRAPE:
+        url_with_filter = phase_info["url_base"] + "&matchFilter=2"
+        # Přidáme "(Budoucí)" k názvu fáze, nebo necháme stejný
+        games_this_phase_future = scrape_games_for_phase_playwright(url_with_filter, phase_info["nazev"], True)
+        if games_this_phase_future:
+            # Odstraníme duplicity, pokud by budoucí zápas už byl v seznamu (nemělo by se stát s UPSERT)
+            for future_game in games_this_phase_future:
+                is_duplicate = False
+                for existing_game in all_games_to_db:
+                    if (existing_game["datum_cas_text"] == future_game["datum_cas_text"] and
+                        existing_game["domaci_tym"] == future_game["domaci_tym"] and
+                        existing_game["hostujici_tym"] == future_game["hostujici_tym"]):
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    all_games_to_db.append(future_game)
+        print(f"Malá pauza mezi fázemi (budoucí)...")
+        time.sleep(3)
     
     if all_games_to_db:
-        print(f"Celkem nalezeno {len(all_games_to_db)} zápasů napříč fázemi. Ukládám do Supabase...")
+        print(f"Celkem nalezeno {len(all_games_to_db)} unikátních záznamů o zápasech. Ukládám do Supabase...")
         try:
             response = supabase.table('zapasy').upsert(
                 all_games_to_db, 
-                on_conflict='datum_cas_text,domaci_tym,hostujici_tym'
+                on_conflict='datum_cas_text,domaci_tym,hostujici_tym' # Ujisti se, že toto unikátní omezení máš v DB
             ).execute()
 
             if hasattr(response, 'data') and response.data:
                  print(f"Úspěšně uloženo/aktualizováno {len(response.data)} záznamů o zápasech.")
             elif hasattr(response, 'error') and response.error:
                 print(f"Chyba při ukládání do Supabase: {response.error}")
+                print(f"Data, která se nepodařilo uložit (prvních 5): {all_games_to_db[:5]}")
             else:
                 print("Nepodařilo se uložit žádná data, nebo odpověď neobsahuje očekávaná data.")
                 print(f"Odpověď Supabase: {response}")
         except Exception as e:
             print(f"Výjimka při ukládání dat zápasů do Supabase: {e}")
     else:
-        print("Nenalezeny žádné zápasy k uložení napříč všemi fázemi.")
+        print("Nenalezeny žádné zápasy k uložení napříč všemi fázemi a filtry.")
         
     print("Skript pro stahování zápasů dokončen. 🔥")
