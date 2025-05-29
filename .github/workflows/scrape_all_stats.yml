@@ -2,7 +2,7 @@ name: Stahování statistik ZÁPASŮ
 
 on:
   schedule:
-    - cron: '15 2 * * *' # Například ve 2:15 ráno
+    - cron: '0 3 * * 3' # Každou středu ve 3:00 ráno
   workflow_dispatch:
 
 jobs:
